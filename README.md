@@ -198,6 +198,40 @@ dotnet test
 | `GET` | `/docs` | Complete validation philosophy and pipeline documentation |
 | `POST` | `/validate` | Validate single email address |
 | `POST` | `/validate/batch` | Validate multiple email addresses concurrently |
+
+---
+
+## Docker
+
+Quick start:
+
+```bash
+docker run --rm -p 8080:8080 pengdows/email-validation-service:latest
+```
+
+Health check:
+
+```bash
+curl http://localhost:8080/health
+```
+
+Validate:
+
+```bash
+curl -X POST http://localhost:8080/validate \
+  -H "Content-Type: application/json" \
+  -d '{"email":"user@example.com"}'
+```
+
+---
+
+## Repository
+
+https://github.com/pengdows/email-validation-service
+
+## License
+
+MIT
 | `GET` | `/health` | Health check endpoint |
 
 ---
