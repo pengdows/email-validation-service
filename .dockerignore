@@ -1,0 +1,15 @@
+**/.git
+**/.gitignore
+**/.idea
+**/.vscode
+**/.vs
+**/.DS_Store
+**/bin
+**/obj
+**/coverage-report
+**/*.user
+**/*.suo
+**/*.pdb
+**/*.log
+**/*.md
+Dockerfile
