@@ -13,11 +13,29 @@ jobs:
   build-and-push:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Read version
+        run: echo "VERSION=$(cat VERSION)" >> "$GITHUB_ENV"
+
+      - name: Tag release
+        if: github.ref == 'refs/heads/main'
+        run: |
+          TAG="v${VERSION}"
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "Tag ${TAG} already exists."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "Release ${TAG}"
+          git push origin "$TAG"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -35,6 +53,8 @@ jobs:
           images: ${{ env.IMAGE_NAME }}
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=v${{ env.VERSION }},enable={{is_default_branch}}
+            type=ref,event=tag
             type=sha
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
