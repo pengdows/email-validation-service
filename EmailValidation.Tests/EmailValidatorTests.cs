@@ -222,6 +222,62 @@ public class EmailValidatorTests
     }
 
     [Fact]
+    public async Task ValidateBatchAsync_DedupesInvalidEmails()
+    {
+        // Arrange
+        var validator = new EmailValidator(new EmailValidatorOptions
+        {
+            CheckDomainExists = false,
+            CheckMxRecords = false
+        });
+
+        var emails = new[]
+        {
+            "invalid@@example.com",
+            "invalid@@example.com"
+        };
+
+        // Act
+        var results = await validator.ValidateBatchAsync(emails);
+
+        // Assert
+        results.Should().HaveCount(1);
+        results.ContainsKey("invalid@@example.com").Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task ValidateBatchAsync_MxFailureSetsResultsForDomain()
+    {
+        // Arrange
+        var dnsValidator = new CountingDnsValidator(
+            mxRecords: _ => ValidationResult.Failure(
+                ValidationFailureReason.DomainDoesNotAcceptMail,
+                "No MX records"));
+
+        var validator = new EmailValidator(new EmailValidatorOptions
+        {
+            CheckDomainExists = false,
+            CheckMxRecords = true
+        }, dnsValidator);
+
+        var emails = new[]
+        {
+            "user1@example.com",
+            "user2@example.com"
+        };
+
+        // Act
+        var results = await validator.ValidateBatchAsync(emails);
+
+        // Assert
+        results.Should().HaveCount(2);
+        results["user1@example.com"].FailureReason.Should()
+            .Be(ValidationFailureReason.DomainDoesNotAcceptMail);
+        results["user2@example.com"].FailureReason.Should()
+            .Be(ValidationFailureReason.DomainDoesNotAcceptMail);
+    }
+
+    [Fact]
     public async Task ValidateBatchAsync_AllowsLocalDeliveryWhenEnabled()
     {
         // Arrange

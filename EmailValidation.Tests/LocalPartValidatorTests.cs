@@ -138,4 +138,15 @@ public class LocalPartValidatorTests
         result.FailureReason.Should().Be(ValidationFailureReason.InvalidLocalPart);
         result.FailureMessage.Should().Contain("dot");
     }
+
+    [Fact]
+    public void GetNormalizationNote_ReturnsNote()
+    {
+        // Act
+        var note = LocalPartValidator.GetNormalizationNote();
+
+        // Assert
+        note.Should().Contain("Gmail");
+        note.Should().Contain("RFC");
+    }
 }
