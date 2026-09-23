@@ -2,6 +2,16 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Mandatory Workflow And Reviews
+
+- TDD is mandatory for every behavior change, bug fix, regression fix, and public-contract change.
+- Start by writing or updating an automated test that fails for the intended reason before changing implementation.
+- Do not start implementation until the test is red; after implementation, rerun the relevant automated tests and do not consider the work complete until they pass with no skipped tests introduced.
+- If automated coverage is genuinely not possible, say so explicitly and document the verification gap.
+- All reviews are done against [REVIEW_POLICY.md](./REVIEW_POLICY.md).
+- Review output, merge guidance, blocker/major/minor classification, required evidence, and minimal patch guidance must follow [REVIEW_POLICY.md](./REVIEW_POLICY.md).
+- If instructions overlap, follow the more stringent requirement. If this file conflicts with [REVIEW_POLICY.md](./REVIEW_POLICY.md) on review behavior, follow [REVIEW_POLICY.md](./REVIEW_POLICY.md).
+
 ## Project Overview
 
 **Email Validation Service** - A microservice that implements proper email validation as a **pipeline**, not a pattern match.
@@ -74,6 +84,14 @@ Check if domain exists at all.
 
 - No fallback to A records (historical, operationally unsafe)
 - Modern, correct stance: **No MX = no mail delivery**
+
+**Layer 3 vs Layer 4 precedence:** a domain can legitimately have MX records with
+no A/AAAA record at its apex (a mail-only domain). A missing A/AAAA record alone
+does NOT block validation if MX succeeds - MX is the authoritative signal. The
+one exception: if Layer 3 fails because the domain (or, for Layer 4, an MX
+exchange host) resolves to a private/internal/loopback address, that's an SSRF
+protection block (`ValidationFailureReason.InternalAddressBlocked`) and is never
+overridden by a later layer.
 
 ### Layer 5: SMTP Verification (Optional, NOT Implemented)
 **Risky and unreliable:**
@@ -207,7 +225,20 @@ var options = new EmailValidatorOptions
 | `InvalidLocalPart` | Local part violates RFC rules (dot placement, invalid characters) |
 | `DomainDoesNotExist` | No DNS A/AAAA records |
 | `DomainDoesNotAcceptMail` | No MX records |
+| `InternalAddressBlocked` | Domain or MX exchange resolves to a private/internal/loopback address (SSRF protection) - always a hard block |
 | `LocalDeliveryNotAllowed` | Policy violation (e.g., "root" without @domain) |
+
+### Informational Flags (do not affect IsValid)
+
+| Field | Description |
+|-------|-------------|
+| `IsDisposable` | Domain matches a known disposable/temporary email provider |
+| `IsRoleBased` | Local-part matches a known role mailbox (admin, support, noreply, ...) |
+
+Both are signals for callers to apply their own policy (e.g. reject disposable
+signups) - a disposable or role-based address is still a real, deliverable
+mailbox, so it does not fail validation on its own. Extend the built-in lists via
+`EmailValidatorOptions.AdditionalDisposableDomains` / `AdditionalRoleBasedLocalParts`.
 
 ## Development Conventions
 

@@ -4,9 +4,9 @@ namespace EmailValidation.Core;
 
 public sealed class DefaultDnsValidator : IDnsValidator
 {
-    public Task<ValidationResult> ValidateDomainExistsAsync(string domain, CancellationToken cancellationToken = default) =>
-        DnsValidator.ValidateDomainExistsAsync(domain, cancellationToken);
+    public ValueTask<ValidationResult> ValidateDomainExistsAsync(string domain, EmailValidatorOptions options, CancellationToken cancellationToken = default) =>
+        new(DnsValidator.ValidateDomainExistsAsync(domain, options, cancellationToken));
 
-    public Task<ValidationResult> ValidateMxRecordsAsync(string domain, CancellationToken cancellationToken = default) =>
-        DnsValidator.ValidateMxRecordsAsync(domain, cancellationToken);
+    public ValueTask<ValidationResult> ValidateMxRecordsAsync(string domain, EmailValidatorOptions options, CancellationToken cancellationToken = default) =>
+        new(DnsValidator.ValidateMxRecordsAsync(domain, options, cancellationToken));
 }

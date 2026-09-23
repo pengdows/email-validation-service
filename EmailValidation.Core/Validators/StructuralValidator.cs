@@ -33,6 +33,14 @@ public static class StructuralValidator
         // Trim only leading/trailing whitespace for normalization
         email = email.Trim();
 
+        // RFC 5321 Section 4.5.3.1.3: Maximum total path length is 256
+        if (email.Length > 256)
+        {
+            return ValidationResult.Failure(
+                ValidationFailureReason.InvalidFormat,
+                "Email address exceeds maximum length of 256 characters");
+        }
+
         // Check for whitespace within the address
         if (email.Any(char.IsWhiteSpace))
         {
@@ -86,6 +94,22 @@ public static class StructuralValidator
         // Extract parts
         localPart = email[..atIndex];
         domain = email[(atIndex + 1)..];
+
+        // RFC 5321 Section 4.5.3.1.1: Maximum local-part length is 64
+        if (localPart.Length > 64)
+        {
+            return ValidationResult.Failure(
+                ValidationFailureReason.InvalidLocalPart,
+                "Local part exceeds maximum length of 64 characters");
+        }
+
+        // RFC 5321 Section 4.5.3.1.2: Maximum domain length is 255
+        if (domain.Length > 255)
+        {
+            return ValidationResult.Failure(
+                ValidationFailureReason.InvalidFormat,
+                "Domain part exceeds maximum length of 255 characters");
+        }
 
         // Validate parts are non-empty
         if (string.IsNullOrWhiteSpace(localPart))

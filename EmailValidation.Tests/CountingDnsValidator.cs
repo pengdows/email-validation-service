@@ -18,15 +18,15 @@ internal sealed class CountingDnsValidator : IDnsValidator
     public Dictionary<string, int> DomainExistsCalls { get; } = new(StringComparer.OrdinalIgnoreCase);
     public Dictionary<string, int> MxCalls { get; } = new(StringComparer.OrdinalIgnoreCase);
 
-    public Task<ValidationResult> ValidateDomainExistsAsync(string domain, CancellationToken cancellationToken = default)
+    public ValueTask<ValidationResult> ValidateDomainExistsAsync(string domain, EmailValidatorOptions options, CancellationToken cancellationToken = default)
     {
         DomainExistsCalls[domain] = DomainExistsCalls.TryGetValue(domain, out var count) ? count + 1 : 1;
-        return Task.FromResult(_domainExists(domain));
+        return new ValueTask<ValidationResult>(_domainExists(domain));
     }
 
-    public Task<ValidationResult> ValidateMxRecordsAsync(string domain, CancellationToken cancellationToken = default)
+    public ValueTask<ValidationResult> ValidateMxRecordsAsync(string domain, EmailValidatorOptions options, CancellationToken cancellationToken = default)
     {
         MxCalls[domain] = MxCalls.TryGetValue(domain, out var count) ? count + 1 : 1;
-        return Task.FromResult(_mxRecords(domain));
+        return new ValueTask<ValidationResult>(_mxRecords(domain));
     }
 }

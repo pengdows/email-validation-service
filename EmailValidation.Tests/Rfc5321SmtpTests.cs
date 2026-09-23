@@ -191,7 +191,8 @@ public class Rfc5321SmtpTests
         var validator = new EmailValidator(new EmailValidatorOptions
         {
             CheckDomainExists = true,
-            CheckMxRecords = true
+            CheckMxRecords = true,
+            AllowInternalDomains = true
         });
 
         // Test with a domain that has A record but no MX

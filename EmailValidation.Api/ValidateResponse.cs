@@ -10,4 +10,6 @@ public record ValidateResponse
     public string? LocalPart { get; init; }
     public string? Domain { get; init; }
     public string[]? MxRecords { get; init; }
+    public bool IsDisposable { get; init; }
+    public bool IsRoleBased { get; init; }
 }

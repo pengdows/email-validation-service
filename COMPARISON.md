@@ -64,7 +64,7 @@ This document compares our implementation with existing open source email valida
 | Syntax validation | Not clearly documented | Character-by-character, NO REGEX |
 | MX validation | ✅ Yes | ✅ Yes |
 | SMTP probing | ✅ Yes (risky) | ❌ No (intentionally avoided) |
-| Disposable detection | ✅ Yes | ❌ Not in scope |
+| Disposable detection | ✅ Yes | ✅ Yes (informational, not a rejection) |
 | A record fallback | Unknown | ❌ NO FALLBACK |
 | Educational focus | ❌ No | ✅ RFC compliance docs |
 | Language | Go | .NET/C# |
@@ -203,6 +203,56 @@ This document compares our implementation with existing open source email valida
 
 ---
 
+### Go/Docker: umuterturk/email-verifier
+
+**Repository:** [umuterturk/email-verifier](https://github.com/umuterturk/email-verifier)
+
+**What it does:**
+- Syntax, domain existence, and MX record checks
+- Same shape as this service: self-hosted, Docker image, no SMTP probing
+- Adds disposable-domain and role-based-address detection
+
+**Critical differences:**
+
+| Feature | umuterturk/email-verifier | Our Implementation |
+|---------|---------------------------|-------------------|
+| Deployment shape | Self-hosted Docker HTTP API | Self-hosted Docker HTTP API (same) |
+| Syntax validation | Unknown implementation | NO REGEX, character-by-character |
+| Disposable detection | ✅ Yes | ✅ Yes |
+| Role-based detection | ✅ Yes | ✅ Yes |
+| RFC annotations | ❌ No | ✅ 223+ tests with RFC sections |
+| Domain-exists vs MX consistency | ❌ Reported false negatives (see below) | ✅ MX is authoritative; domain-exists alone never blocks a domain with valid MX |
+
+**Documented correctness issues** (their tracker, not ours):
+- [#12](https://github.com/umuterturk/email-verifier/issues/12) and [#14](https://github.com/umuterturk/email-verifier/issues/14): `domain_exists: false` while `mx_records: true` for real, mail-capable domains - an internally inconsistent result from treating "has an A/AAAA record" as a precondition for "domain exists."
+- [#3](https://github.com/umuterturk/email-verifier/issues/3): a single-character local-part (`j@...`) was rejected outright, despite neither RFC 5321 nor RFC 5322 imposing a minimum local-part length.
+
+This is the closest self-hosted service to what we've built, which is exactly why it's worth naming precisely: we found and fixed the equivalent of both bugs above in our own pipeline before publishing this comparison (see `CompetitorGapTests.cs` - `ValidateAsync_DomainHasMxButNoAAAARecord_IsStillValid` and `LocalPartValidator_SingleCharacterLocalPart_IsValid`), and added the same private/internal-IP (SSRF) screening to MX-exchange hosts that we already applied to the domain's own A/AAAA records, so that fixing the false-negative doesn't quietly reopen a security gap.
+
+---
+
+### Rust/Docker: Reacher (reacherhq/check-if-email-exists)
+
+**Repository:** [reacherhq/check-if-email-exists](https://github.com/reacherhq/check-if-email-exists)
+
+**What it does:**
+- Syntax, MX, and live SMTP handshake (RCPT TO) mailbox-existence checking
+- Self-hosted Docker HTTP API
+
+**Critical differences:**
+
+| Feature | Reacher | Our Implementation |
+|---------|---------|-------------------|
+| SMTP mailbox probing | ✅ Yes (real RCPT TO handshake) | ❌ No, by default (see below) |
+| Requires outbound port 25 | ✅ Yes | N/A |
+| Reliable against catch-all/accept-all domains (e.g. many Gmail configs) | ⚠️ No - these providers accept any RCPT TO | N/A (doesn't attempt to answer this question) |
+| Syntax validation | Unknown implementation | NO REGEX, character-by-character |
+| RFC annotations | ❌ No | ✅ 223+ tests with RFC sections |
+
+**Our stance on SMTP probing:** we deliberately don't do this by default. It requires outbound port 25 (blocked by many cloud providers), gets IPs greylisted/blocked at scale, and is unreliable against accept-all domains regardless of how gently it's done. If we add an opt-in SMTP mode later, it will ship with the same internal/private-address screening as the MX check above, applied to the actual SMTP connection target - not just the DNS answer - since an SMTP probe against arbitrary user-supplied domains is a stronger SSRF primitive than a DNS lookup.
+
+---
+
 ## Common Problems with Existing Tools
 
 ### 1. Regex Creep
@@ -297,7 +347,7 @@ Most libraries are "just use this API" with no explanation of WHY.
 | **RFC Annotations** | ✅ | ❌ | ❌ | ❌ | ❌ |
 | **Educational Docs** | ✅ | ❌ | ❌ | ❌ | ❌ |
 | **SMTP Probing** | ❌ No | ✅ | ✅ | ✅ | ❌ Unknown |
-| **Disposable Detection** | ❌ | ❌ | ✅ | ✅ | ❌ Unknown |
+| **Disposable Detection** | ✅ | ❌ | ✅ | ✅ | ❌ Unknown |
 | **Language** | .NET/C# | Python | Go | Node.js | .NET/C# |
 | **REST API** | ✅ | ❌ | ❌ | ❌ | ❌ |
 

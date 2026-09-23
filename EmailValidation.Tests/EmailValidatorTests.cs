@@ -457,4 +457,26 @@ public class EmailValidatorTests
         // Assert
         result.IsValid.Should().BeTrue();
     }
+
+    [Fact]
+    public async Task ValidateBatchAsync_NullEntry_DoesNotThrowAndReturnsInvalidFormat()
+    {
+        // Arrange
+        var validator = new EmailValidator(new EmailValidatorOptions
+        {
+            CheckDomainExists = false,
+            CheckMxRecords = false
+        });
+
+        var emails = new[] { "valid@example.com", (string)null! };
+
+        // Act
+        var results = await validator.ValidateBatchAsync(emails);
+
+        // Assert
+        results.Should().HaveCount(2);
+        results["valid@example.com"].IsValid.Should().BeTrue();
+        results[string.Empty].IsValid.Should().BeFalse();
+        results[string.Empty].FailureReason.Should().Be(ValidationFailureReason.InvalidFormat);
+    }
 }

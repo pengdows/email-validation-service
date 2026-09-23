@@ -4,6 +4,7 @@ WORKDIR /src
 COPY EmailValidation.sln ./
 COPY EmailValidation.Api/EmailValidation.Api.csproj EmailValidation.Api/
 COPY EmailValidation.Core/EmailValidation.Core.csproj EmailValidation.Core/
+COPY EmailValidation.Caching/EmailValidation.Caching.csproj EmailValidation.Caching/
 COPY EmailValidation.Tests/EmailValidation.Tests.csproj EmailValidation.Tests/
 
 RUN dotnet restore

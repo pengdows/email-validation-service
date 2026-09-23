@@ -35,7 +35,8 @@ public class Rfc974MailRoutingTests
         var validator = new EmailValidator(new EmailValidatorOptions
         {
             CheckDomainExists = true,
-            CheckMxRecords = true
+            CheckMxRecords = true,
+            AllowInternalDomains = true
         });
 
         // Test with localhost - has A record but no MX

@@ -28,6 +28,13 @@ public enum ValidationFailureReason
     DomainDoesNotAcceptMail,
 
     /// <summary>
+    /// Domain or a mail exchanger resolves to a private/internal/loopback address
+    /// (SSRF protection). Unlike DomainDoesNotExist, this is never deferred to a
+    /// later pipeline layer - it is a hard block regardless of MX results.
+    /// </summary>
+    InternalAddressBlocked,
+
+    /// <summary>
     /// Mailbox may not exist (optional SMTP verification failed)
     /// This is never definitive - SMTP can lie
     /// </summary>

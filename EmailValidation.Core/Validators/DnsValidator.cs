@@ -2,6 +2,7 @@ using System.IO;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
+using DnsClient;
 
 namespace EmailValidation.Core.Validators;
 
@@ -14,7 +15,10 @@ public static class DnsValidator
     /// <summary>
     /// Layer 3: Check if domain exists (DNS A or AAAA record).
     /// </summary>
-    public static async Task<ValidationResult> ValidateDomainExistsAsync(string domain, CancellationToken cancellationToken = default)
+    public static async Task<ValidationResult> ValidateDomainExistsAsync(
+        string domain,
+        EmailValidatorOptions options,
+        CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(domain))
         {
@@ -25,7 +29,15 @@ public static class DnsValidator
 
         try
         {
-            var addresses = await Dns.GetHostAddressesAsync(domain, cancellationToken);
+            // SECURITY: Add timeout to prevent hanging requests
+            using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(
+                cancellationToken,
+                timeoutCts.Token);
+
+            linkedCts.Token.ThrowIfCancellationRequested();
+
+            var addresses = await Dns.GetHostAddressesAsync(domain, linkedCts.Token);
 
             if (addresses.Length == 0)
             {
@@ -34,8 +46,36 @@ public static class DnsValidator
                     $"Domain '{domain}' has no A or AAAA records");
             }
 
+            // SECURITY: Block private/internal IP addresses (SSRF protection).
+            // Distinct failure reason from "no records at all" - this is a hard
+            // block that must never be overridden by a later pipeline layer
+            // (e.g. a successful MX check), unlike genuine non-existence.
+            if (!options.AllowInternalDomains)
+            {
+                foreach (var addr in addresses)
+                {
+                    if (addr.IsInternalOrPrivate())
+                    {
+                        return ValidationResult.Failure(
+                            ValidationFailureReason.InternalAddressBlocked,
+                            $"Domain '{domain}' resolves to internal/private address");
+                    }
+                }
+            }
+
             // Domain exists
             return ValidationResult.Success(domain, string.Empty, domain);
+        }
+        catch (OperationCanceledException)
+        {
+            var isTimeout = !cancellationToken.IsCancellationRequested;
+            var message = isTimeout
+                ? $"DNS lookup timeout for domain '{domain}'"
+                : $"DNS lookup canceled for domain '{domain}'";
+
+            return ValidationResult.Failure(
+                ValidationFailureReason.DomainDoesNotExist,
+                message);
         }
         catch (SocketException)
         {
@@ -45,9 +85,14 @@ public static class DnsValidator
         }
         catch (Exception ex)
         {
+            var message = $"DNS lookup failed for domain '{domain}'";
+            if (options.DetailedErrorMessages)
+            {
+                message += $" (Detail: {ex.Message})";
+            }
             return ValidationResult.Failure(
                 ValidationFailureReason.DomainDoesNotExist,
-                $"DNS lookup failed for domain '{domain}': {ex.Message}");
+                message);
         }
     }
 
@@ -56,7 +101,10 @@ public static class DnsValidator
     /// CRITICAL: No MX record = no mail delivery. Period.
     /// We do NOT fall back to A records (historical behavior, operationally unsafe).
     /// </summary>
-    public static async Task<ValidationResult> ValidateMxRecordsAsync(string domain, CancellationToken cancellationToken = default)
+    public static async Task<ValidationResult> ValidateMxRecordsAsync(
+        string domain,
+        EmailValidatorOptions options,
+        CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(domain))
         {
@@ -67,8 +115,7 @@ public static class DnsValidator
 
         try
         {
-            // Use a minimal DNS query over UDP for MX records.
-            var mxRecords = await GetMxRecordsAsync(domain, cancellationToken);
+            var mxRecords = await GetMxRecordsAsync(domain, options, cancellationToken);
 
             if (mxRecords.Length == 0)
             {
@@ -77,242 +124,126 @@ public static class DnsValidator
                     $"Domain '{domain}' has no MX records - cannot accept mail");
             }
 
+            // SECURITY: Block MX exchangers that resolve to private/internal addresses
+            // (SSRF protection). Mirrors the same check on the domain's own A/AAAA
+            // records - without this, a domain with no public A/AAAA record could
+            // point mail at an internal host and never be screened, since MX success
+            // can now stand on its own when the apex has no A/AAAA record.
+            if (!options.AllowInternalDomains)
+            {
+                foreach (var exchange in mxRecords)
+                {
+                    if (await ResolvesToInternalAddressAsync(exchange, cancellationToken))
+                    {
+                        return ValidationResult.Failure(
+                            ValidationFailureReason.InternalAddressBlocked,
+                            $"Domain '{domain}' has an MX record ('{exchange}') that resolves to an internal/private address");
+                    }
+                }
+            }
+
             // MX records found - domain accepts mail
             return ValidationResult.Success(domain, string.Empty, domain, mxRecords);
         }
-        catch (Exception ex)
+        catch (OperationCanceledException)
         {
+            var isTimeout = !cancellationToken.IsCancellationRequested;
+            var message = isTimeout
+                ? $"MX lookup timeout for domain '{domain}'"
+                : $"MX lookup canceled for domain '{domain}'";
+
             return ValidationResult.Failure(
                 ValidationFailureReason.DomainDoesNotAcceptMail,
-                $"MX lookup failed for domain '{domain}': {ex.Message}");
+                message);
+        }
+        catch (Exception ex)
+        {
+            var message = $"MX lookup failed for domain '{domain}'";
+            if (options.DetailedErrorMessages)
+            {
+                message += $" (Detail: {ex.Message})";
+            }
+            return ValidationResult.Failure(
+                ValidationFailureReason.DomainDoesNotAcceptMail,
+                message);
         }
     }
 
     /// <summary>
-    /// Get MX records for a domain.
-    /// Note: .NET doesn't have built-in MX lookup in System.Net.Dns.
-    /// This implementation performs a minimal DNS query over UDP.
+    /// Resolves an MX exchange hostname and reports whether any resolved address
+    /// is private/internal/loopback. Resolution failures are not treated as a
+    /// block - an MX host we can't resolve isn't a confirmed internal target,
+    /// it's just an unrelated lookup failure (e.g. transient DNS issue).
     /// </summary>
-    private static async Task<string[]> GetMxRecordsAsync(string domain, CancellationToken cancellationToken)
+    private static async Task<bool> ResolvesToInternalAddressAsync(string exchange, CancellationToken cancellationToken)
     {
-        var nameServers = GetNameServers();
-        if (nameServers.Length == 0)
+        try
         {
-            return Array.Empty<string>();
-        }
+            using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token);
 
-        foreach (var nameServer in nameServers)
+            var addresses = await Dns.GetHostAddressesAsync(exchange, linkedCts.Token);
+            return addresses.Any(a => a.IsInternalOrPrivate());
+        }
+        catch
         {
-            var records = await QueryMxRecordsAsync(domain, nameServer, cancellationToken);
-            if (records.Length > 0)
-            {
-                return records;
-            }
+            // Can't resolve the exchange host at all - not a confirmed internal
+            // target, so don't block on it here.
+            return false;
         }
-
-        return Array.Empty<string>();
     }
 
-    private static async Task<string[]> QueryMxRecordsAsync(
-        string domain,
-        IPEndPoint nameServer,
-        CancellationToken cancellationToken)
+    private static async Task<string[]> GetMxRecordsAsync(string domain, EmailValidatorOptions options, CancellationToken cancellationToken)
     {
-        using var client = new UdpClient();
-        client.Connect(nameServer);
+        var lookupOptions = GetLookupClientOptions(options);
+        var lookup = new LookupClient(lookupOptions);
 
-        var query = BuildMxQuery(domain, out var queryId);
         cancellationToken.ThrowIfCancellationRequested();
-        await client.SendAsync(query, query.Length);
 
-        var response = await client.ReceiveAsync(cancellationToken);
-        return ParseMxResponse(response.Buffer, queryId);
+        var result = await lookup.QueryAsync(domain, QueryType.MX, cancellationToken: cancellationToken);
+
+        if (result.HasError)
+        {
+            throw new Exception(result.ErrorMessage);
+        }
+
+        return result.Answers
+            .MxRecords()
+            .OrderBy(mx => mx.Preference)
+            .Select(mx => mx.Exchange.Value.TrimEnd('.'))
+            .ToArray();
     }
 
-    internal static byte[] BuildMxQuery(string domain, out ushort queryId)
+    private static LookupClientOptions GetLookupClientOptions(EmailValidatorOptions options)
     {
-        queryId = (ushort)Random.Shared.Next(ushort.MinValue, ushort.MaxValue + 1);
-
-        using var buffer = new MemoryStream();
-        using var writer = new BinaryWriter(buffer);
-
-        // Header
-        WriteUInt16(writer, queryId);       // ID
-        WriteUInt16(writer, 0x0100);        // Flags: standard query, recursion desired
-        WriteUInt16(writer, 1);             // QDCOUNT
-        WriteUInt16(writer, 0);             // ANCOUNT
-        WriteUInt16(writer, 0);             // NSCOUNT
-        WriteUInt16(writer, 0);             // ARCOUNT
-
-        // Question
-        WriteQName(writer, domain);
-        WriteUInt16(writer, 15);            // QTYPE = MX
-        WriteUInt16(writer, 1);             // QCLASS = IN
-
-        return buffer.ToArray();
+        var nameServers = GetNameServers(options);
+        var lookupOptions = new LookupClientOptions(nameServers)
+        {
+            UseCache = false,
+            Timeout = TimeSpan.FromSeconds(5),
+            Retries = 2,
+            ThrowDnsErrors = false
+        };
+        return lookupOptions;
     }
 
-    internal static string[] ParseMxResponse(byte[] message, ushort queryId)
+    private static NameServer[] GetNameServers(EmailValidatorOptions options)
     {
-        if (message.Length < 12)
+        var servers = new List<NameServer>();
+
+        if (!string.IsNullOrWhiteSpace(options.PrimaryDnsServer) &&
+            IPAddress.TryParse(options.PrimaryDnsServer, out var primary))
         {
-            return Array.Empty<string>();
+            servers.Add(new NameServer(new IPEndPoint(primary, 53)));
         }
 
-        var offset = 0;
-        var responseId = ReadUInt16(message, ref offset);
-        if (responseId != queryId)
+        if (!string.IsNullOrWhiteSpace(options.SecondaryDnsServer) &&
+            IPAddress.TryParse(options.SecondaryDnsServer, out var secondary))
         {
-            return Array.Empty<string>();
+            servers.Add(new NameServer(new IPEndPoint(secondary, 53)));
         }
 
-        var flags = ReadUInt16(message, ref offset);
-        var isResponse = (flags & 0x8000) != 0;
-        var rcode = flags & 0x000F;
-        if (!isResponse || rcode != 0)
-        {
-            return Array.Empty<string>();
-        }
-
-        var qdCount = ReadUInt16(message, ref offset);
-        var anCount = ReadUInt16(message, ref offset);
-        var nsCount = ReadUInt16(message, ref offset);
-        var arCount = ReadUInt16(message, ref offset);
-
-        // Skip questions
-        for (var i = 0; i < qdCount; i++)
-        {
-            SkipName(message, ref offset);
-            offset += 4; // QTYPE + QCLASS
-        }
-
-        var mxRecords = new List<string>();
-
-        for (var i = 0; i < anCount; i++)
-        {
-            SkipName(message, ref offset);
-            var type = ReadUInt16(message, ref offset);
-            var @class = ReadUInt16(message, ref offset);
-            offset += 4; // TTL
-            var rdLength = ReadUInt16(message, ref offset);
-
-            if (type == 15 && @class == 1)
-            {
-                offset += 2; // Preference
-                var exchange = ReadName(message, ref offset);
-                if (!string.IsNullOrWhiteSpace(exchange))
-                {
-                    mxRecords.Add(exchange.TrimEnd('.'));
-                }
-            }
-            else
-            {
-                offset += rdLength;
-            }
-        }
-
-        _ = nsCount;
-        _ = arCount;
-
-        return mxRecords.ToArray();
-    }
-
-    private static void WriteQName(BinaryWriter writer, string domain)
-    {
-        var labels = domain.Split('.', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        foreach (var label in labels)
-        {
-            var bytes = Encoding.ASCII.GetBytes(label);
-            writer.Write((byte)bytes.Length);
-            writer.Write(bytes);
-        }
-
-        writer.Write((byte)0);
-    }
-
-    private static void SkipName(byte[] message, ref int offset)
-    {
-        ReadName(message, ref offset);
-    }
-
-    private static string ReadName(byte[] message, ref int offset)
-    {
-        var name = new StringBuilder();
-        var jumped = false;
-        var originalOffset = offset;
-
-        while (offset < message.Length)
-        {
-            var length = message[offset++];
-            if (length == 0)
-            {
-                break;
-            }
-
-            if ((length & 0xC0) == 0xC0)
-            {
-                if (offset >= message.Length)
-                {
-                    break;
-                }
-
-                var pointer = ((length & 0x3F) << 8) | message[offset++];
-                if (!jumped)
-                {
-                    originalOffset = offset;
-                }
-
-                offset = pointer;
-                jumped = true;
-                continue;
-            }
-
-            if (offset + length > message.Length)
-            {
-                break;
-            }
-
-            if (name.Length > 0)
-            {
-                name.Append('.');
-            }
-
-            name.Append(Encoding.ASCII.GetString(message, offset, length));
-            offset += length;
-        }
-
-        if (jumped)
-        {
-            offset = originalOffset;
-        }
-
-        return name.ToString();
-    }
-
-    private static ushort ReadUInt16(byte[] message, ref int offset)
-    {
-        if (offset + 1 >= message.Length)
-        {
-            offset = message.Length;
-            return 0;
-        }
-
-        var value = (ushort)((message[offset] << 8) | message[offset + 1]);
-        offset += 2;
-        return value;
-    }
-
-    private static void WriteUInt16(BinaryWriter writer, ushort value)
-    {
-        writer.Write((byte)(value >> 8));
-        writer.Write((byte)(value & 0xFF));
-    }
-
-    private static IPEndPoint[] GetNameServers()
-    {
-        var servers = new List<IPEndPoint>();
-
-        if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS())
+        if (servers.Count == 0 && (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS()))
         {
             try
             {
@@ -325,29 +256,68 @@ public static class DnsValidator
                     }
 
                     var parts = trimmed.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-                    if (parts.Length < 2)
+                    if (parts.Length >= 2 && IPAddress.TryParse(parts[1], out var ip))
                     {
-                        continue;
-                    }
-
-                    if (IPAddress.TryParse(parts[1], out var ip))
-                    {
-                        servers.Add(new IPEndPoint(ip, 53));
+                        servers.Add(new NameServer(new IPEndPoint(ip, 53)));
                     }
                 }
             }
             catch
             {
-                // Ignore and fall back to public resolvers.
+                // Ignore and fall back
             }
+        }
+
+        if (servers.Count == 0 && options.AllowPublicDnsFallback)
+        {
+            servers.Add(new NameServer(IPAddress.Parse("8.8.8.8")));
+            servers.Add(new NameServer(IPAddress.Parse("1.1.1.1")));
         }
 
         if (servers.Count == 0)
         {
-            servers.Add(new IPEndPoint(IPAddress.Parse("8.8.8.8"), 53));
-            servers.Add(new IPEndPoint(IPAddress.Parse("1.1.1.1"), 53));
+            // If strictly local or misconfigured environment with no public fallback allowed:
+            // Fallback to safe defaults or throw. In production without config, this will throw.
+            // We use DnsClient's default which queries system networks automatically if we just let it.
+            // But we already parsed resolv.conf on Linux/Mac. On Windows it wouldn't find any.
+            // Let's fallback to localhost if entirely empty.
+            servers.Add(new NameServer(IPAddress.Loopback));
         }
 
         return servers.ToArray();
+    }
+}
+
+internal static class IPAddressExtensions
+{
+    public static bool IsInternalOrPrivate(this IPAddress address)
+    {
+        if (address == null)
+        {
+            return false;
+        }
+
+        var bytes = address.GetAddressBytes();
+
+        // IPv6 mapped IPv4
+        if (address.IsIPv4MappedToIPv6)
+        {
+            address = address.MapToIPv4();
+            bytes = address.GetAddressBytes();
+        }
+
+        return IPAddress.IsLoopback(address) ||
+               // Private ranges (RFC 1918)
+               (bytes[0] == 10) ||
+               (bytes[0] == 172 && bytes[1] >= 16 && bytes[1] <= 31) ||
+               (bytes[0] == 192 && bytes[1] == 168) ||
+               // Link-local / APIPA (169.254.0.0/16)
+               (bytes[0] == 169 && bytes[1] == 254) ||
+               // Cloud metadata endpoints
+               (bytes[0] == 100 && bytes[1] >= 64 && bytes[1] <= 127) || // 100.64.0.0/10 (Carrier-grade NAT)
+               // Multicast
+               (bytes[0] >= 224 && bytes[0] <= 239) ||
+               // Reserved/experimental
+               (bytes[0] >= 240);
     }
 }

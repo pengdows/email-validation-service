@@ -1,11 +1,27 @@
+using System.Threading.RateLimiting;
+using Microsoft.AspNetCore.RateLimiting;
 using EmailValidation.Api;
+using EmailValidation.Caching;
 using EmailValidation.Core;
 using System.Text.Json.Serialization;
 
 var builder = WebApplication.CreateBuilder(args);
 
 // Add services
-builder.Services.AddSingleton<IDnsValidator, DefaultDnsValidator>();
+// DNS results are uncached by default. Set DnsCache:SqlitePath (or the
+// DNSCACHE__SQLITEPATH env var) to enable a persistent, cross-request cache
+// backed by pengdows.crud - see EmailValidation.Caching/SqliteDnsCache.cs.
+var dnsCacheSqlitePath = builder.Configuration["DnsCache:SqlitePath"];
+if (string.IsNullOrWhiteSpace(dnsCacheSqlitePath))
+{
+    builder.Services.AddSingleton<IDnsValidator, DefaultDnsValidator>();
+}
+else
+{
+    var cachingValidator = await SqliteDnsCache.CreateAsync(new DefaultDnsValidator(), dnsCacheSqlitePath);
+    builder.Services.AddSingleton<IDnsValidator>(cachingValidator);
+}
+
 builder.Services.AddSingleton(sp => new EmailValidator(
     new EmailValidatorOptions
     {
@@ -15,6 +31,19 @@ builder.Services.AddSingleton(sp => new EmailValidator(
     },
     sp.GetRequiredService<IDnsValidator>()));
 
+// Configure Rate Limiting
+builder.Services.AddRateLimiter(options =>
+{
+    options.AddFixedWindowLimiter("fixed", policy =>
+    {
+        policy.PermitLimit = 100;
+        policy.Window = TimeSpan.FromSeconds(10);
+        policy.QueueProcessingOrder = QueueProcessingOrder.OldestFirst;
+        policy.QueueLimit = 10;
+    });
+    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+});
+
 // Configure JSON options
 builder.Services.ConfigureHttpJsonOptions(options =>
 {
@@ -23,6 +52,8 @@ builder.Services.ConfigureHttpJsonOptions(options =>
 });
 
 var app = builder.Build();
+
+app.UseRateLimiter();
 
 // API Documentation endpoint
 app.MapGet("/", () => new
@@ -100,6 +131,11 @@ app.MapPost("/validate", async (ValidateRequest request, EmailValidator validato
         return Results.BadRequest(new { error = "Email is required" });
     }
 
+    if (request.Email.Length > 320)
+    {
+        return Results.BadRequest(new { error = "Email exceeds maximum length of 320 characters" });
+    }
+
     var result = await validator.ValidateAsync(request.Email);
 
     var response = new ValidateResponse
@@ -111,11 +147,13 @@ app.MapPost("/validate", async (ValidateRequest request, EmailValidator validato
         NormalizedEmail = result.NormalizedEmail,
         LocalPart = result.LocalPart,
         Domain = result.Domain,
-        MxRecords = result.MxRecords
+        MxRecords = result.MxRecords,
+        IsDisposable = result.IsDisposable,
+        IsRoleBased = result.IsRoleBased
     };
 
     return Results.Ok(response);
-});
+}).RequireRateLimiting("fixed");
 
 // Validate batch of emails
 app.MapPost("/validate/batch", async (ValidateBatchRequest request, EmailValidator validator) =>
@@ -123,6 +161,16 @@ app.MapPost("/validate/batch", async (ValidateBatchRequest request, EmailValidat
     if (request.Emails == null || !request.Emails.Any())
     {
         return Results.BadRequest(new { error = "Emails array is required and must not be empty" });
+    }
+
+    if (request.Emails.Length > ValidateBatchRequest.MaxBatchSize)
+    {
+        return Results.BadRequest(new { error = $"Batch size {request.Emails.Length} exceeds maximum of {ValidateBatchRequest.MaxBatchSize}" });
+    }
+
+    if (request.Emails.Any(string.IsNullOrWhiteSpace))
+    {
+        return Results.BadRequest(new { error = "Emails array cannot contain null, empty, or whitespace-only values" });
     }
 
     var results = await validator.ValidateBatchAsync(request.Emails);
@@ -138,12 +186,14 @@ app.MapPost("/validate/batch", async (ValidateBatchRequest request, EmailValidat
             NormalizedEmail = kvp.Value.NormalizedEmail,
             LocalPart = kvp.Value.LocalPart,
             Domain = kvp.Value.Domain,
-            MxRecords = kvp.Value.MxRecords
+            MxRecords = kvp.Value.MxRecords,
+            IsDisposable = kvp.Value.IsDisposable,
+            IsRoleBased = kvp.Value.IsRoleBased
         }).ToArray()
     };
 
     return Results.Ok(response);
-});
+}).RequireRateLimiting("fixed");
 
 // Health check
 app.MapGet("/health", () => new
@@ -154,3 +204,5 @@ app.MapGet("/health", () => new
 });
 
 app.Run();
+
+public partial class Program;

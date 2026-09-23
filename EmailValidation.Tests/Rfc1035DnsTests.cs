@@ -1,4 +1,5 @@
 using EmailValidation.Core;
+using EmailValidation.Core.Validators;
 using FluentAssertions;
 
 namespace EmailValidation.Tests;
@@ -117,7 +118,8 @@ public class Rfc1035DnsTests
         var validator = new EmailValidator(new EmailValidatorOptions
         {
             CheckDomainExists = true,
-            CheckMxRecords = false
+            CheckMxRecords = false,
+            AllowInternalDomains = true
         });
 
         // localhost should have A record (127.0.0.1)
@@ -159,39 +161,50 @@ public class Rfc1035DnsTests
 
     /// <summary>
     /// RFC 1035 Section 7.4: Recommended Resource Record Caching
-    /// DNS responses can be cached according to TTL
+    /// DNS responses can be cached according to TTL.
     ///
-    /// Note: Our implementation does not currently implement caching
-    /// Each validation performs fresh DNS lookups
+    /// EmailValidator itself performs no caching - every call goes straight to
+    /// whichever IDnsValidator it was given. A persistent, cross-request cache
+    /// is available as an explicit opt-in decorator
+    /// (EmailValidation.Caching.CachingDnsValidator, backed by pengdows.crud)
+    /// rather than being built into the core pipeline - see
+    /// CachingDnsValidatorTests.cs for cache-specific behavior (hits, misses,
+    /// TTL expiry).
     /// </summary>
     [Fact]
-    public void Rfc1035_Section_7_4_DnsCaching_NotImplemented()
+    public async Task Rfc1035_Section_7_4_DnsCaching_IsOptInViaDecorator_NotBuiltIntoCorePipeline()
     {
-        // RFC 1035 recommends caching DNS responses according to TTL
-        // TODO: Consider implementing DNS caching for performance
-        // Current implementation: fresh lookup on each validation
+        var dns = new CountingDnsValidator();
+        var validator = new EmailValidator(new EmailValidatorOptions(), dns);
 
-        // This is documented behavior - no caching currently implemented
-        true.Should().BeTrue("DNS caching not implemented - fresh lookups each time");
+        await validator.ValidateAsync("user@example.com");
+        await validator.ValidateAsync("user@example.com");
+
+        dns.MxCalls["example.com"].Should().Be(2,
+            "EmailValidator itself must not cache - caching is only available by composing in CachingDnsValidator");
     }
 
     /// <summary>
     /// RFC 2181 Section 11: Name syntax
-    /// Any binary string can be a DNS label (relaxes RFC 1035 restrictions)
-    /// However, host names have stricter requirements (RFC 952, RFC 1123)
+    /// Any binary string can be a DNS label (relaxes RFC 1035 restrictions).
+    /// However, host names have stricter requirements (RFC 952, RFC 1123).
     ///
-    /// For email, we use hostname rules, not general DNS label rules
+    /// For email, we use hostname rules, not general DNS label rules -
+    /// enforced by DomainSyntaxValidator, character-by-character, no regex.
     /// </summary>
-    [Fact]
-    public void Rfc2181_Section_11_DnsVsHostname_Documentation()
+    [Theory]
+    [InlineData("-bad.com")]           // label cannot start with a hyphen
+    [InlineData("bad-.com")]           // label cannot end with a hyphen
+    [InlineData("exa..mple.com")]      // consecutive dots = empty label
+    [InlineData(".example.com")]      // leading dot
+    [InlineData("example.com.")]      // trailing dot
+    [InlineData("exa$mple.com")]      // DNS would tolerate this binary label; hostname rules do not
+    public void Rfc2181_Section_11_DnsVsHostname_RejectsNonHostnameLabels(string domain)
     {
-        // RFC 2181 Section 11 clarifies that DNS labels can be any binary string
-        // But email domain names should follow hostname syntax (RFC 952/1123)
+        var result = DomainSyntaxValidator.Validate(domain);
 
-        // We validate syntax at the structural level
-        // Full domain validation would enforce hostname rules
-        // TODO: Consider adding stricter domain syntax validation
-
-        true.Should().BeTrue("Domain validation uses hostname rules, not general DNS label rules");
+        result.IsValid.Should().BeFalse(
+            $"'{domain}' is not valid hostname syntax (RFC 952/1123), even though RFC 2181 " +
+            "would tolerate arbitrary binary DNS labels");
     }
 }

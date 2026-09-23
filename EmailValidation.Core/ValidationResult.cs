@@ -30,14 +30,35 @@ public sealed class ValidationResult
     /// </summary>
     public string[]? MxRecords { get; init; }
 
-    public static ValidationResult Success(string normalizedEmail, string localPart, string domain, string[]? mxRecords = null) =>
+    /// <summary>
+    /// True if the domain is a known disposable/temporary email provider.
+    /// Informational only - does not affect IsValid (disposable addresses are still deliverable).
+    /// </summary>
+    public bool IsDisposable { get; init; }
+
+    /// <summary>
+    /// True if the local-part is a known role-based mailbox (e.g. admin, support, noreply)
+    /// rather than an individual's address.
+    /// Informational only - does not affect IsValid (role addresses are still deliverable).
+    /// </summary>
+    public bool IsRoleBased { get; init; }
+
+    public static ValidationResult Success(
+        string normalizedEmail,
+        string localPart,
+        string domain,
+        string[]? mxRecords = null,
+        bool isDisposable = false,
+        bool isRoleBased = false) =>
         new()
         {
             IsValid = true,
             NormalizedEmail = normalizedEmail,
             LocalPart = localPart,
             Domain = domain,
-            MxRecords = mxRecords
+            MxRecords = mxRecords,
+            IsDisposable = isDisposable,
+            IsRoleBased = isRoleBased
         };
 
     public static ValidationResult Failure(ValidationFailureReason reason, string message) =>
